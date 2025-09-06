@@ -28,7 +28,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 model_vosk = Model(VOSK_MODEL_PATH)
 
 # Load FLAN-T5-LARGE model for grammar correction
-MODEL_NAME = "google/flan-t5-large"
+MODEL_NAME = "google/flan-t5-base"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model_flan = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
@@ -154,3 +154,4 @@ async def grammar(text: str = Form(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
