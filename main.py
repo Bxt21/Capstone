@@ -28,7 +28,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 model_vosk = Model(VOSK_MODEL_PATH)
 
 # Load FLAN-T5-LARGE model for grammar correction
-MODEL_NAME = "google/flan-t5-base"
+MODEL_NAME = "google/flan-t5-large"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model_flan = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
 
@@ -69,49 +69,43 @@ async def recognize(file: UploadFile = File(...)):
 async def translate(text: str = Form(...)):
     try:
         gesture_sequence = []
-        words = text.strip().split()
+
+        # Split input by spaces
+        words = text.strip().lower().split()
 
         with sqlite3.connect(DB_PATH) as conn:
             c = conn.cursor()
-
-            for word in words:
-                word_norm = word.strip().upper().replace(" ", "_")
-                c.execute("""
-                    SELECT g.gesture_path
-                    FROM gestures g
-                    JOIN signs s ON g.sign_id = s.id
-                    WHERE UPPER(s.name)=?
-                """, (word_norm,))
-                row = c.fetchone()
-
-                if row:
-                    gesture_sequence.append(row[0])
-                    continue
-
-                # Fingerspell fallback
-                i = 0
-                while i < len(word_norm):
-                    if i + 1 < len(word_norm) and word_norm[i:i+2] == "NG":
-                        c.execute("""
-                            SELECT g.gesture_path
-                            FROM gestures g
-                            JOIN signs s ON g.sign_id = s.id
-                            WHERE UPPER(s.name)='NG'
-                        """)
-                        row = c.fetchone()
-                        gesture_sequence.append(row[0] if row else "NG")
-                        i += 2
+            i = 0
+            while i < len(words):
+                # Try to match multi-word phrases first (2-word or 3-word max)
+                matched = False
+                for span in range(3, 0, -1):  # check 3-word, 2-word, then 1-word
+                    if i + span > len(words):
                         continue
-
-                    letter = word_norm[i]
+                    phrase = "_".join(words[i:i+span]).upper()
                     c.execute("""
                         SELECT g.gesture_path
                         FROM gestures g
                         JOIN signs s ON g.sign_id = s.id
                         WHERE UPPER(s.name)=?
-                    """, (letter,))
+                    """, (phrase,))
                     row = c.fetchone()
-                    gesture_sequence.append(row[0] if row else letter)
+                    if row:
+                        gesture_sequence.append(row[0])
+                        i += span
+                        matched = True
+                        break
+                if not matched:
+                    # fallback to fingerspelling for single letters
+                    for ch in words[i].upper():
+                        c.execute("""
+                            SELECT g.gesture_path
+                            FROM gestures g
+                            JOIN signs s ON g.sign_id = s.id
+                            WHERE UPPER(s.name)=?
+                        """, (ch,))
+                        row = c.fetchone()
+                        gesture_sequence.append(row[0] if row else ch)
                     i += 1
 
         return {"translation": gesture_sequence}
@@ -154,4 +148,3 @@ async def grammar(text: str = Form(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
