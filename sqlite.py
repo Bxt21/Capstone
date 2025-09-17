@@ -12,11 +12,20 @@ WORDS = [
     "WHO", "WHY", "YES", "YOU"
 ]
 
+# Phrase -> Gesture mapping
+PHRASE_MAPPING = {
+    "I_AM": ["ME"],
+    "MY": ["ME"],
+    "WHAT_IS": ["WHAT"],
+    "WHATS": ["WHAT"],
+    "YOUR": ["YOU"]
+}
+
 def create_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # Drop old tables if they exist (fresh start)
+    # Drop old tables if they exist
     c.execute("DROP TABLE IF EXISTS gestures")
     c.execute("DROP TABLE IF EXISTS signs")
 
@@ -43,9 +52,17 @@ def create_db():
         gesture_path = f"Gestures/{sign}"
         c.execute("INSERT INTO gestures (sign_id, gesture_path) VALUES (?, ?)", (sign_id, gesture_path))
 
+    # Insert phrases with mapped gestures
+    for phrase, gestures in PHRASE_MAPPING.items():
+        c.execute("INSERT INTO signs (name) VALUES (?)", (phrase,))
+        sign_id = c.lastrowid
+        for gesture in gestures:
+            gesture_path = f"Gestures/{gesture}"
+            c.execute("INSERT INTO gestures (sign_id, gesture_path) VALUES (?, ?)", (sign_id, gesture_path))
+
     conn.commit()
     conn.close()
-    print(f"✅ New database created at {DB_PATH}")
+    print(f"✅ Database created at {DB_PATH} with phrases mapped to correct gestures")
 
 if __name__ == "__main__":
     create_db()
