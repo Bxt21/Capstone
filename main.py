@@ -1,4 +1,3 @@
-# server.py
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -6,6 +5,7 @@ from vosk import Model, KaldiRecognizer
 import wave, os, sqlite3, uuid, re
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
+from spellchecker import SpellChecker
 
 app = FastAPI()
 
@@ -27,10 +27,22 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Load Vosk model
 model_vosk = Model(VOSK_MODEL_PATH)
 
-# Load FLAN-T5-LARGE model for grammar correction
-MODEL_NAME = "google/flan-t5-large"
+# Load grammar correction model (Grammarly CoEdit)
+MODEL_NAME = "grammarly/coedit-large"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model_flan = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+model_grammar = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+
+# Init spell checker
+spell = SpellChecker()
+
+def spell_correct(text: str) -> str:
+    corrected_words = []
+    for word in text.split():
+        if not word.strip():
+            continue
+        corrected = spell.correction(word)
+        corrected_words.append(corrected if corrected else word)
+    return " ".join(corrected_words)
 
 # ----------------- SPEECH RECOGNITION -----------------
 @app.post("/recognize/")
@@ -50,7 +62,8 @@ async def recognize(file: UploadFile = File(...)):
         result_text = ""
         while True:
             data = wf.readframes(4000)
-            if len(data) == 0: break
+            if len(data) == 0:
+                break
             if rec.AcceptWaveform(data):
                 res = rec.Result()
                 result_text += eval(res).get("text", "") + " "
@@ -68,21 +81,19 @@ async def recognize(file: UploadFile = File(...)):
 @app.post("/translate/")
 async def translate(text: str = Form(...)):
     try:
-        gesture_sequence = []
-
-        # Split input by spaces
-        words = text.strip().lower().split()
+        translation_sequence = []
+        words = text.strip().split()
 
         with sqlite3.connect(DB_PATH) as conn:
             c = conn.cursor()
             i = 0
             while i < len(words):
-                # Try to match multi-word phrases first (2-word or 3-word max)
                 matched = False
-                for span in range(3, 0, -1):  # check 3-word, 2-word, then 1-word
+                for span in range(3, 0, -1):
                     if i + span > len(words):
                         continue
-                    phrase = "_".join(words[i:i+span]).upper()
+                    # Clean words only for lookup
+                    phrase = "_".join([re.sub(r"[^A-ZÑ]", "", w.upper()) for w in words[i:i+span]])
                     c.execute("""
                         SELECT g.gesture_path
                         FROM gestures g
@@ -91,13 +102,18 @@ async def translate(text: str = Form(...)):
                     """, (phrase,))
                     row = c.fetchone()
                     if row:
-                        gesture_sequence.append(row[0])
+                        gesture_name = os.path.splitext(os.path.basename(row[0]))[0].upper()
+                        translation_sequence.append({"word": " ".join(words[i:i+span]), "gestures":[gesture_name]})
                         i += span
                         matched = True
                         break
                 if not matched:
-                    # fallback to fingerspelling for single letters
-                    for ch in words[i].upper():
+                    # Fingerspell each letter for unknown words
+                    word = words[i]
+                    finger_letters = []
+                    for ch in word.upper():
+                        if not ch.isalpha() and ch not in ["Ñ"]:  # keep letters only
+                            continue
                         c.execute("""
                             SELECT g.gesture_path
                             FROM gestures g
@@ -105,46 +121,51 @@ async def translate(text: str = Form(...)):
                             WHERE UPPER(s.name)=?
                         """, (ch,))
                         row = c.fetchone()
-                        gesture_sequence.append(row[0] if row else ch)
+                        letter_name = os.path.splitext(os.path.basename(row[0]))[0].upper() if row else ch
+                        finger_letters.append(letter_name)
+                    translation_sequence.append({"word": word, "gestures": finger_letters})
                     i += 1
 
-        return {"translation": gesture_sequence}
+        return {"translation": translation_sequence}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-# ----------------- GRAMMAR CORRECTION -----------------
+
+# ----------------- GRAMMAR + SPELL CORRECTION -----------------
 @app.post("/grammar/", response_class=PlainTextResponse)
 async def grammar(text: str = Form(...)):
     try:
-        if not text.strip(): 
+        if not text.strip():
             return ""
 
-        # Improved prompt for FLAN-T5-LARGE
-        prompt = (
-            "Correct the following sentence into natural English suitable for sign language. "
-            "Keep it simple and short. Do not add punctuation.\n\n"
-            f"Sentence: {text}\nCorrected:"
-        )       
+        # Step 1: Spell correction
+        text = spell_correct(text)
 
-
-        inputs = tokenizer(prompt, return_tensors="pt")
+        # Step 2: Grammar correction (Grammarly CoEdit)
+        inputs = tokenizer(text, return_tensors="pt").to("cpu")
         with torch.no_grad():
-            outputs = model_flan.generate(
+            outputs = model_grammar.generate(
                 **inputs,
-                max_length=50,
+                max_length=128,
                 do_sample=False,
                 num_beams=5
             )
         corrected_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        # Remove special characters except letters, numbers, spaces, Ñ/ñ
-        cleaned_text = re.sub(r"[^a-zA-Z0-9\sÑñ]", "", corrected_text)
+        # Step 3: Light cleanup (keep punctuation and ñ/Ñ)
+        cleaned_text = re.sub(r"[^a-zA-Z0-9\s,.?!'Ññ]", "", corrected_text)
 
-        return cleaned_text
+        return cleaned_text.strip()
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # ----------------- RUN SERVER -----------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        ssl_keyfile="key.pem",
+        ssl_certfile="cert.pem"
+    )
